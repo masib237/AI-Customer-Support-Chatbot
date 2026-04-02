@@ -1,10 +1,11 @@
 import streamlit as st
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+from sentence_transformers import SentenceTransformer, util
 
 st.set_page_config(page_title="AI Customer Support", page_icon="🤖")
 st.title("🤖 AI Customer Support Chatbot")
 
-# 1. Load model and tokenizer directly (Avoids the Pipeline task error)
+# Load model and tokenizer directly 
 @st.cache_resource
 def load_model():
     model_id = "google/flan-t5-base"
@@ -14,9 +15,14 @@ def load_model():
 
 tokenizer, model = load_model()
 
-# =========================
-# STEP 3: KNOWLEDGE BASE
-# =========================
+# STEP 6.3: load embedding model for semantic search
+@st.cache_resource
+def load_embedder():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+embedder = load_embedder()
+
+# KNOWLEDGE BASE
 knowledge_base = {
     "General Inquiry": {
         "what services do you offer": "We offer education abroad support, visa assistance, and investment advisory services.",
@@ -43,6 +49,24 @@ knowledge_base = {
     }
 }
 
+# STEP 6.4: precompute embeddings for all questions in knowledge base
+def compute_kb_embeddings():
+    kb_embeddings = {}
+
+    for category, qa_pairs in knowledge_base.items():
+        questions = list(qa_pairs.keys())
+        embeddings = embedder.encode(questions, convert_to_tensor=True)
+
+        kb_embeddings[category] = {
+            "questions": questions,
+            "answers": list(qa_pairs.values()),
+            "embeddings": embeddings
+        }
+
+    return kb_embeddings
+
+kb_data = compute_kb_embeddings()
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -57,27 +81,32 @@ for msg in st.session_state.messages:
 
 user_input = st.chat_input("Ask your question...")
 
-# =========================
-# STEP 4: RETRIEVAL FUNCTION
-# =========================
+# STEP 6.5: semantic search instead of keyword matching
 def get_context(category, user_input):
-    user_input = user_input.lower()
-
-    if category not in knowledge_base:
+    if category not in kb_data:
         return None
 
-    best_match = None
+    # convert user question to embedding
+    user_embedding = embedder.encode(user_input, convert_to_tensor=True)
 
-    for question, answer in knowledge_base[category].items():
-        if question in user_input:
-            best_match = answer
-            break
+    questions = kb_data[category]["questions"]
+    answers = kb_data[category]["answers"]
+    embeddings = kb_data[category]["embeddings"]
 
-    return best_match
+    # compute similarity scores
+    scores = util.cos_sim(user_embedding, embeddings)[0]
 
-# =========================
-# STEP 5: UPDATED PROMPT LOGIC
-# =========================
+    # get best match
+    best_idx = scores.argmax().item()
+    best_score = scores[best_idx].item()
+
+    # only return if similarity is strong enough
+    if best_score < 0.5:
+        return None
+
+    return answers[best_idx]
+
+# AI PROMPT LOGIC
 if user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
